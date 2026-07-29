@@ -1,14 +1,21 @@
 # shell-browser
 
-Headless Chrome automation via chromedp.
+Headless Chrome automation via chromedp, driven by agents that also hold chat
+and secret-store access. Treat every page as hostile input.
 
 ## Architecture
 
-- `cmd/shell-browser/main.go` — Cobra CLI entrypoint
-- `internal/browser/browser.go` — Core execution: chromedp context, action dispatch, screenshot capture
-- `internal/browser/parse.go` — Directive and action parsing from text
-- `internal/browser/browser_test.go` — Tests for parsing and sleep duration
-- `browser.go` — Public API: type aliases and function re-exports
+- `cmd/shell-browser/main.go` — CLI entrypoint (`<url> [action...]`), flag
+  parsing, artifact markers for screenshots
+- `internal/browser/browser.go` — execution: chromedp context, action dispatch,
+  ref targeting, JS gate, post-navigation policy re-checks, result formatting
+- `internal/browser/policy.go` — domain allow/deny policy + SSRF guards
+- `internal/browser/fetch.go` — HTTP fast path, HTML→text, escalation decision
+- `internal/browser/snapshot.go` — accessibility-tree snapshot, refs, candidate
+  suggestions
+- `internal/browser/untrusted.go` — `<untrusted-page-content>` envelope
+- `internal/browser/parse.go` — directive/action parsing
+- `browser.go` — public API: type aliases and function re-exports
 
 ## Build & Test
 
@@ -22,7 +29,27 @@ make vet      # Run go vet
 
 - `BrowserRe` regex matches `[browser url="..."]...[/browser]` blocks
 - `ParseDirective(url, body)` extracts URL and actions from block body
-- `Execute(ctx, cfg, directive)` runs actions sequentially, returns `*Result`
-- `FormatResults(result)` formats output for LLM consumption
-- Screenshots returned as `[]byte` in `StepResult.Data`
-- Actions: navigate, click, type, wait, screenshot, extract, js, sleep
+- `ExecuteFetchFirst(ctx, cfg, d, forceRender)` is the entrypoint: plain HTTP
+  when the page allows it, Chrome otherwise. `Execute` is the Chrome-only path.
+- `FormatResults(result)` formats output; page-derived steps get wrapped
+- Screenshots returned as `[]byte` in `StepResult.Screenshot`
+- Actions: navigate, click, type, wait, screenshot, extract, js, sleep,
+  snapshot, text (the first eight are the original set — keep them working,
+  the installed skill uses them)
+
+## Invariants (do not regress)
+
+- `Policy.Check` runs **before** Chrome is launched and again after any
+  navigating action; deny beats allow; explicit `allow` entries are the only
+  way past the private-network guard.
+- The `js` action is refused unless `--allow-js` or `"allow_js": true`. The
+  internal `stealthJS` injection is ours and is unaffected.
+- Anything read off a page (`extract`, `text`, `snapshot`, `js` results) is
+  wrapped by `WrapUntrusted`, with marker sequences in the payload escaped.
+- Never log environment variables, cookies or raw CDP traffic — `WithLogf`
+  only, never `chromedp.WithDebugf`. Log URLs through `redactURL`.
+- Snapshots are capped (120 elements / 5KB) so they stay usable in an agent's
+  context.
+- The accessibility result types in `snapshot.go` are deliberately local and
+  lenient: cdproto's generated enums reject property values from newer Chrome
+  builds and would break `getFullAXTree` entirely.

@@ -20,6 +20,12 @@ const (
 	ActionExtract
 	ActionJS
 	ActionSleep
+	// ActionSnapshot lists the interactable elements of the current page with
+	// stable per-run refs (e1, e2, ...) that click/type accept.
+	ActionSnapshot
+	// ActionText extracts the whole page as plain text. Servable by the
+	// HTTP fast path without launching Chrome.
+	ActionText
 )
 
 // Action represents a single browser step.
@@ -47,6 +53,10 @@ func (a Action) String() string {
 		return fmt.Sprintf("js %q", a.Value)
 	case ActionSleep:
 		return fmt.Sprintf("sleep %q", a.Value)
+	case ActionSnapshot:
+		return "snapshot"
+	case ActionText:
+		return "text"
 	default:
 		return "unknown"
 	}
@@ -56,6 +66,10 @@ func (a Action) String() string {
 type Directive struct {
 	URL     string
 	Actions []Action
+	// Unknown holds lines that matched no action. Callers must surface these:
+	// a mistyped action word used to fall through to the default text read, so
+	// the caller got page content back and believed its action had run.
+	Unknown []string
 }
 
 // BrowserRe matches [browser url="..."]...[/browser] blocks.
@@ -79,48 +93,75 @@ func ParseDirective(url, body string) Directive {
 		case line == "navigate":
 			d.Actions = append(d.Actions, Action{Type: ActionNavigate, Value: url})
 
+		case line == "snapshot":
+			d.Actions = append(d.Actions, Action{Type: ActionSnapshot})
+
+		case line == "text":
+			d.Actions = append(d.Actions, Action{Type: ActionText})
+
 		case line == "screenshot":
 			d.Actions = append(d.Actions, Action{Type: ActionScreenshot})
 
 		case strings.HasPrefix(line, "click "):
-			qs := quotedRe.FindStringSubmatch(line)
-			if len(qs) >= 2 {
-				d.Actions = append(d.Actions, Action{Type: ActionClick, Selector: qs[1]})
+			if v, ok := arg1(line, "click "); ok {
+				d.Actions = append(d.Actions, Action{Type: ActionClick, Selector: v})
 			}
 
 		case strings.HasPrefix(line, "type "):
 			qs := quotedRe.FindAllStringSubmatch(line, 2)
 			if len(qs) >= 2 {
 				d.Actions = append(d.Actions, Action{Type: ActionType_, Selector: qs[0][1], Value: qs[1][1]})
+			} else if sel, val, ok := arg2(line, "type "); ok {
+				d.Actions = append(d.Actions, Action{Type: ActionType_, Selector: sel, Value: val})
 			}
 
 		case strings.HasPrefix(line, "wait "):
-			qs := quotedRe.FindStringSubmatch(line)
-			if len(qs) >= 2 {
-				d.Actions = append(d.Actions, Action{Type: ActionWait, Selector: qs[1]})
+			if v, ok := arg1(line, "wait "); ok {
+				d.Actions = append(d.Actions, Action{Type: ActionWait, Selector: v})
 			}
 
 		case strings.HasPrefix(line, "extract "):
-			qs := quotedRe.FindStringSubmatch(line)
-			if len(qs) >= 2 {
-				d.Actions = append(d.Actions, Action{Type: ActionExtract, Selector: qs[1]})
+			if v, ok := arg1(line, "extract "); ok {
+				d.Actions = append(d.Actions, Action{Type: ActionExtract, Selector: v})
 			}
 
 		case strings.HasPrefix(line, "js "):
-			qs := quotedRe.FindStringSubmatch(line)
-			if len(qs) >= 2 {
-				d.Actions = append(d.Actions, Action{Type: ActionJS, Value: qs[1]})
+			if v, ok := arg1(line, "js "); ok {
+				d.Actions = append(d.Actions, Action{Type: ActionJS, Value: v})
 			}
 
 		case strings.HasPrefix(line, "sleep "):
-			qs := quotedRe.FindStringSubmatch(line)
-			if len(qs) >= 2 {
-				d.Actions = append(d.Actions, Action{Type: ActionSleep, Value: qs[1]})
+			if v, ok := arg1(line, "sleep "); ok {
+				d.Actions = append(d.Actions, Action{Type: ActionSleep, Value: v})
 			}
+
+		default:
+			d.Unknown = append(d.Unknown, line)
 		}
 	}
 
 	return d
+}
+
+// arg1 returns the single argument of a one-argument action line. A
+// double-quoted argument is preferred (the historical form); an unquoted
+// remainder is accepted so `click e12` works as well as `click "e12"`.
+func arg1(line, prefix string) (string, bool) {
+	if qs := quotedRe.FindStringSubmatch(line); len(qs) >= 2 {
+		return qs[1], true
+	}
+	v := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	return v, v != ""
+}
+
+// arg2 splits an unquoted two-argument action line on the first space.
+func arg2(line, prefix string) (string, string, bool) {
+	rest := strings.TrimSpace(strings.TrimPrefix(line, prefix))
+	sel, val, ok := strings.Cut(rest, " ")
+	if !ok || sel == "" {
+		return "", "", false
+	}
+	return sel, strings.TrimSpace(val), true
 }
 
 // ParseSleepDuration parses a sleep value like "2s", "500ms" into time.Duration.
