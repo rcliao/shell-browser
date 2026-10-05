@@ -24,8 +24,15 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// exitLocked is the exit status when a human holds the session's tab.
-const exitLocked = 3
+// exitLocked is the exit status when a human holds the session's tab;
+// exitWall when the page is a bot-protection wall instead of the site.
+const (
+	exitLocked = 3
+	exitWall   = 4
+)
+
+// errWall is returned by report when the run ended on a bot wall.
+var errWall = errors.New("blocked by a bot wall")
 
 func main() {
 	var (
@@ -62,7 +69,11 @@ actions:
 sessions (--session <name>):
   Chrome stays open between runs, so the tab, cookies and page carry over.
   Pass "-" as the url to keep working on the page the tab already shows.
-  Exit status 3 means a human currently holds the tab (a handoff is open).`,
+  Exit status 3 means a human currently holds the tab (a handoff is open).
+
+exit status 4: the page is a bot-protection wall (Akamai, PerimeterX,
+  Cloudflare, DataDome, Imperva), not the site. The output says what to try
+  next: --session (a real window), then a handoff to a person.`,
 		Args:          cobra.ArbitraryArgs,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -142,7 +153,17 @@ sessions (--session <name>):
 			if sessName != "" {
 				fmt.Fprintf(os.Stderr, "[session %s: tab left open at %s]\n", sessName, res.URL)
 			}
-			return report(res)
+			err = report(res)
+			if res.Wall != nil {
+				// Stdout, not just stderr: callers often pipe stdout through
+				// head/grep, and this line is the one they must not lose.
+				fmt.Printf("[blocked: %s bot wall (%s), not the site's content. Next: %s]\n",
+					res.Wall.Vendor, res.Wall.Evidence, res.Wall.NextStep(sessName))
+				if err == nil {
+					err = errWall
+				}
+			}
+			return err
 		},
 	}
 
@@ -165,6 +186,9 @@ sessions (--session <name>):
 		fmt.Fprintln(os.Stderr, "error:", err)
 		if errors.Is(err, session.ErrLocked) {
 			os.Exit(exitLocked)
+		}
+		if errors.Is(err, errWall) {
+			os.Exit(exitWall)
 		}
 		os.Exit(2)
 	}
