@@ -97,6 +97,9 @@ type Result struct {
 	Mode string
 	// Escalation explains why the HTTP fast path was abandoned, if it was.
 	Escalation string
+	// Wall is set when the page ended on a bot-protection wall instead of
+	// the site (see wall.go). The run counts as failed.
+	Wall *Wall
 }
 
 func (r *Result) fail(step int, desc string, err error) {
@@ -254,6 +257,7 @@ func Execute(ctx context.Context, cfg Config, d Directive) *Result {
 		}
 	}
 
+	result.Wall = ex.detectWall()
 	return result
 }
 
