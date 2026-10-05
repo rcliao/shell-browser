@@ -153,15 +153,17 @@ exit status 4: the page is a bot-protection wall (Akamai, PerimeterX,
 			if sessName != "" {
 				fmt.Fprintf(os.Stderr, "[session %s: tab left open at %s]\n", sessName, res.URL)
 			}
-			err = report(res)
 			if res.Wall != nil {
-				// Stdout, not just stderr: callers often pipe stdout through
-				// head/grep, and this line is the one they must not lose.
+				// First and on stdout: callers often pipe through head/grep,
+				// and this is the line they must not lose. The shell daemon
+				// also reads it from the tool result to count the run as a
+				// failure when a pipe hid exit status 4.
 				fmt.Printf("[blocked: %s bot wall (%s), not the site's content. Next: %s]\n",
 					res.Wall.Vendor, res.Wall.Evidence, res.Wall.NextStep(sessName))
-				if err == nil {
-					err = errWall
-				}
+			}
+			err = report(res)
+			if res.Wall != nil && err == nil {
+				err = errWall
 			}
 			return err
 		},
