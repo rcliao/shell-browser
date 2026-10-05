@@ -12,11 +12,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"time"
 
 	sb "github.com/rcliao/shell-browser/internal/browser"
+	"github.com/rcliao/shell-browser/liveview"
 	"github.com/rcliao/shell-browser/session"
 	"github.com/spf13/cobra"
 )
@@ -37,6 +40,7 @@ func main() {
 		sessName   string
 		listSess   bool
 		closeSess  bool
+		serveLive  string
 	)
 
 	root := &cobra.Command{
@@ -65,6 +69,12 @@ sessions (--session <name>):
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if listSess {
 				return listSessions()
+			}
+			if serveLive != "" {
+				if sessName == "" {
+					return errors.New("--serve-live needs --session <name>")
+				}
+				return serveLiveView(sessName, serveLive, policyPath)
 			}
 			if closeSess {
 				if sessName == "" {
@@ -149,6 +159,7 @@ sessions (--session <name>):
 	f.StringVar(&sessName, "session", "", "run in a named Chrome that stays open between runs (url \"-\" = stay on the current page)")
 	f.BoolVar(&listSess, "list-sessions", false, "list sessions and whether each is running")
 	f.BoolVar(&closeSess, "close-session", false, "close the --session Chrome")
+	f.StringVar(&serveLive, "serve-live", "", "serve a live, interactive view of the --session tab on this address (e.g. 127.0.0.1:8765) until Done or Ctrl-C")
 
 	if err := root.Execute(); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -273,4 +284,47 @@ func writeScreenshot(data []byte) (string, error) {
 		return "", err
 	}
 	return f.Name(), nil
+}
+
+// serveLiveView is the manual/debug entry to the live view: the shell daemon
+// embeds package liveview directly and publishes it over the tailnet.
+func serveLiveView(name, addr, policyPath string) error {
+	if policyPath == "" {
+		policyPath = sb.PolicyPath()
+	}
+	policy, err := sb.LoadPolicy(policyPath)
+	if err != nil {
+		return err
+	}
+	s, err := session.Open(session.Root(), name)
+	if err != nil {
+		return err
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	ep, err := s.Ensure(ctx, session.LaunchOptions{})
+	if err != nil {
+		return err
+	}
+	done := make(chan liveview.Result, 1)
+	v, err := liveview.New(ctx, liveview.Options{
+		Session: s, Endpoint: ep, Mode: liveview.ModeHandoff,
+		Title: "Live browser: " + name, Policy: policy,
+		OnDone: func(r liveview.Result) { done <- r },
+	})
+	if err != nil {
+		return err
+	}
+	srv := &http.Server{Addr: addr, Handler: v}
+	go func() { _ = srv.ListenAndServe() }()
+	fmt.Fprintf(os.Stderr, "live view of session %s on http://%s/ (Ctrl-C to stop)\n", name, addr)
+	select {
+	case r := <-done:
+		fmt.Printf("done: %s\n", r.URL)
+	case <-ctx.Done():
+	}
+	v.Close("")
+	shutCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutCtx)
 }
