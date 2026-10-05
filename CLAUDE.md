@@ -46,6 +46,8 @@ make vet      # Run go vet
 - Session contexts are released with `session.Attach`'s release func, never a
   plain cancel and never `chromedp.Cancel`: chromedp closes RemoteAllocator
   tabs on cancel, and `chromedp.Cancel` closes the whole browser.
+- The live view's phone layout resizes the real window; `Close` must restore
+  it (`restoreWindow`) so the agent gets the tab back at the size it left it.
 - The live view's address bar goes through `Policy.Check`, like every other
   navigation; `/input` and `/done` accept `application/json` only.
 

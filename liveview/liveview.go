@@ -29,6 +29,7 @@ import (
 	"sync"
 	"time"
 
+	cdpbrowser "github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/page"
@@ -87,6 +88,9 @@ type Viewer struct {
 	title    string
 	lastX    float64
 	lastY    float64
+	layout   string              // "desktop" (as the agent left it) or "phone"
+	winID    cdpbrowser.WindowID // window of the tab, once layout was changed
+	origWin  *cdpbrowser.Bounds  // window bounds to restore when the view ends
 	subs     map[chan []byte]struct{}
 	ended    bool
 	doneOnce sync.Once
@@ -107,7 +111,7 @@ func New(parent context.Context, opt Options) (*Viewer, error) {
 		pol = browser.DefaultPolicy()
 	}
 	ctx, cancel := context.WithCancel(parent)
-	v := &Viewer{opt: opt, policy: pol, ctx: ctx, cancel: cancel, subs: map[chan []byte]struct{}{}}
+	v := &Viewer{opt: opt, policy: pol, ctx: ctx, cancel: cancel, subs: map[chan []byte]struct{}{}, layout: LayoutDesktop}
 	tid, err := opt.Session.CurrentTarget(ctx, opt.Endpoint)
 	if err != nil {
 		cancel()
@@ -277,8 +281,9 @@ func (v *Viewer) Close(message string) {
 	}
 	v.broadcast(sseEvent("ended", map[string]string{"message": message}))
 	if tabCtx != nil {
-		sctx, cancel := context.WithTimeout(tabCtx, 2*time.Second)
+		sctx, cancel := context.WithTimeout(tabCtx, 3*time.Second)
 		_ = chromedp.Run(sctx, page.StopScreencast())
+		v.restoreWindow(sctx) // the agent gets the tab back at the size it left it
 		cancel()
 	}
 	if release != nil {
@@ -420,7 +425,7 @@ func (v *Viewer) broadcastState() {
 }
 
 func (v *Viewer) stateEventLocked() []byte {
-	return sseEvent("state", map[string]any{"url": v.url, "title": v.title})
+	return sseEvent("state", map[string]any{"url": v.url, "title": v.title, "layout": v.layout})
 }
 
 func sseEvent(name string, data any) []byte {
@@ -431,14 +436,55 @@ func sseEvent(name string, data any) []byte {
 // InputEvent is one action from the person. X and Y are fractions (0..1) of
 // the displayed frame, so the page needs no knowledge of the real viewport.
 type InputEvent struct {
-	T   string  `json:"t"` // tap | wheel | text | key | nav | back | reload
+	T   string  `json:"t"` // tap | wheel | text | key | nav | back | reload | layout
 	X   float64 `json:"x"`
 	Y   float64 `json:"y"`
 	DY  float64 `json:"dy"`
 	S   string  `json:"s"`   // text
 	K   string  `json:"k"`   // key name
 	URL string  `json:"url"` // nav
+	// Layout is "phone" or "desktop" for t=layout.
+	Layout string `json:"layout"`
 }
+
+// TapResult tells the page whether the tap focused a text field, so it can
+// bring up the person's keyboard.
+type TapResult struct {
+	Editable bool `json:"editable"`
+}
+
+// errBadInput marks a malformed input event (answered 400, not 502).
+var errBadInput = errors.New("bad input")
+
+// Layouts for t=layout.
+const (
+	LayoutDesktop = "desktop"
+	LayoutPhone   = "phone"
+)
+
+// phoneWidth/phoneHeight size the real window for a person on a phone: most
+// sites switch to their mobile layout below ~600 CSS px, so captchas and
+// buttons arrive at a tappable size instead of a third of a desktop page.
+// (Chrome on macOS will not make a window much narrower than ~500 px.)
+const (
+	phoneWidth  = 480
+	phoneHeight = 960
+)
+
+// editableJS reports whether the focused element takes typing. It is our
+// code, run in the page after a tap; it reads, never writes.
+const editableJS = `(() => {
+  let a = document.activeElement;
+  while (a && a.shadowRoot && a.shadowRoot.activeElement) a = a.shadowRoot.activeElement;
+  if (!a) return false;
+  if (a.isContentEditable) return true;
+  const t = (a.tagName || "").toLowerCase();
+  if (t === "textarea") return !a.readOnly && !a.disabled;
+  if (t !== "input") return false;
+  const ty = (a.type || "text").toLowerCase();
+  return !a.readOnly && !a.disabled &&
+    !["button","checkbox","radio","submit","reset","file","image","range","color","hidden"].includes(ty);
+})()`
 
 func (v *Viewer) serveInput(w http.ResponseWriter, r *http.Request) {
 	if v.opt.Mode != ModeHandoff {
@@ -456,16 +502,26 @@ func (v *Viewer) serveInput(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "bad input: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if err := v.Dispatch(ev); err != nil {
+	res, err := v.Dispatch(ev)
+	if err != nil {
 		var pe *browser.PolicyError
 		if errors.As(err, &pe) {
 			http.Error(w, err.Error(), http.StatusForbidden)
 			return
 		}
+		if errors.Is(err, errBadInput) {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	if res == nil {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(res)
 }
 
 func (v *Viewer) serveDone(w http.ResponseWriter, r *http.Request) {
@@ -514,8 +570,27 @@ var keyDefs = map[string]struct {
 	"Delete":     {"Delete", 46, ""},
 }
 
-// Dispatch replays one input event into the tab.
-func (v *Viewer) Dispatch(ev InputEvent) error {
+// Dispatch replays one input event into the tab. A tap returns a TapResult;
+// other events return nil.
+func (v *Viewer) Dispatch(ev InputEvent) (any, error) {
+	if ev.T == "layout" {
+		return nil, v.setLayout(ev.Layout)
+	}
+	err := v.dispatch(ev)
+	if err != nil || ev.T != "tap" {
+		return nil, err
+	}
+	v.mu.Lock()
+	tabCtx := v.tabCtx
+	v.mu.Unlock()
+	ctx, cancel := context.WithTimeout(tabCtx, 3*time.Second)
+	defer cancel()
+	var editable bool
+	_ = chromedp.Run(ctx, chromedp.Sleep(80*time.Millisecond), chromedp.Evaluate(editableJS, &editable))
+	return TapResult{Editable: editable}, nil
+}
+
+func (v *Viewer) dispatch(ev InputEvent) error {
 	v.inputMu.Lock()
 	defer v.inputMu.Unlock()
 	v.mu.Lock()
@@ -572,7 +647,7 @@ func (v *Viewer) Dispatch(ev InputEvent) error {
 	case "key":
 		k, ok := keyDefs[ev.K]
 		if !ok {
-			return fmt.Errorf("unsupported key %q", ev.K)
+			return fmt.Errorf("%w: unsupported key %q", errBadInput, ev.K)
 		}
 		down := input.DispatchKeyEvent(input.KeyRawDown)
 		if k.text != "" {
@@ -600,7 +675,7 @@ func (v *Viewer) Dispatch(ev InputEvent) error {
 	case "reload":
 		return chromedp.Run(ctx, page.Reload())
 	}
-	return fmt.Errorf("unknown input %q", ev.T)
+	return fmt.Errorf("%w: unknown input %q", errBadInput, ev.T)
 }
 
 func clamp01(f float64) float64 {
@@ -631,4 +706,82 @@ func normalizeURL(raw string) (string, error) {
 		return "", fmt.Errorf("only http and https addresses can be opened here")
 	}
 	return u.String(), nil
+}
+
+// setLayout resizes the tab's real window: "phone" makes it narrow so the
+// site serves its mobile layout; "desktop" restores the size it had before.
+func (v *Viewer) setLayout(mode string) error {
+	if mode != LayoutPhone && mode != LayoutDesktop {
+		return fmt.Errorf("%w: layout must be %q or %q", errBadInput, LayoutPhone, LayoutDesktop)
+	}
+	v.inputMu.Lock()
+	defer v.inputMu.Unlock()
+	v.mu.Lock()
+	tabCtx, cur, ended := v.tabCtx, v.layout, v.ended
+	v.mu.Unlock()
+	if ended || tabCtx == nil {
+		return errors.New("this view has ended")
+	}
+	if mode == cur {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(tabCtx, 5*time.Second)
+	defer cancel()
+	if mode == LayoutPhone {
+		var id cdpbrowser.WindowID
+		var orig *cdpbrowser.Bounds
+		err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+			var err error
+			id, orig, err = cdpbrowser.GetWindowForTarget().Do(ctx)
+			if err != nil {
+				return err
+			}
+			if orig != nil && orig.WindowState != "" && orig.WindowState != cdpbrowser.WindowStateNormal {
+				// A maximized or fullscreen window must go normal before it can be sized.
+				if err := cdpbrowser.SetWindowBounds(id, &cdpbrowser.Bounds{WindowState: cdpbrowser.WindowStateNormal}).Do(ctx); err != nil {
+					return err
+				}
+			}
+			return cdpbrowser.SetWindowBounds(id, &cdpbrowser.Bounds{Width: phoneWidth, Height: phoneHeight}).Do(ctx)
+		}))
+		if err != nil {
+			return fmt.Errorf("resize window: %w", err)
+		}
+		v.mu.Lock()
+		if v.origWin == nil {
+			v.winID, v.origWin = id, orig
+		}
+		v.layout = LayoutPhone
+		v.mu.Unlock()
+	} else {
+		v.restoreWindow(ctx)
+	}
+	v.broadcastState()
+	return nil
+}
+
+// restoreWindow puts the window back to the bounds it had before the first
+// phone layout. Safe to call when nothing was changed.
+func (v *Viewer) restoreWindow(ctx context.Context) {
+	v.mu.Lock()
+	id, orig := v.winID, v.origWin
+	v.origWin = nil
+	v.layout = LayoutDesktop
+	v.mu.Unlock()
+	if orig == nil {
+		return
+	}
+	err := chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
+		b := &cdpbrowser.Bounds{Left: orig.Left, Top: orig.Top, Width: orig.Width, Height: orig.Height}
+		if err := cdpbrowser.SetWindowBounds(id, b).Do(ctx); err != nil {
+			return err
+		}
+		if orig.WindowState != "" && orig.WindowState != cdpbrowser.WindowStateNormal {
+			return cdpbrowser.SetWindowBounds(id, &cdpbrowser.Bounds{WindowState: orig.WindowState}).Do(ctx)
+		}
+		return nil
+	}))
+	if err != nil {
+		slog.Warn("liveview: could not restore the window size", "error", err)
+	}
 }
