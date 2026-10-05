@@ -16,6 +16,10 @@ and secret-store access. Treat every page as hostile input.
 - `internal/browser/untrusted.go` — `<untrusted-page-content>` envelope
 - `internal/browser/parse.go` — directive/action parsing
 - `browser.go` — public API: type aliases and function re-exports
+- `session/` — named Chrome that outlives a run (`--session`): detached launch
+  with a loopback debug port, tab selection, human-hold lock, `Attach`
+- `liveview/` — streams a session tab (CDP screencast over SSE) and replays a
+  person's taps/typing/navigation; used by the shell daemon for handoffs
 
 ## Build & Test
 
@@ -38,6 +42,12 @@ make vet      # Run go vet
   the installed skill uses them)
 
 ## Invariants (do not regress)
+
+- Session contexts are released with `session.Attach`'s release func, never a
+  plain cancel and never `chromedp.Cancel`: chromedp closes RemoteAllocator
+  tabs on cancel, and `chromedp.Cancel` closes the whole browser.
+- The live view's address bar goes through `Policy.Check`, like every other
+  navigation; `/input` and `/done` accept `application/json` only.
 
 - `Policy.Check` runs **before** Chrome is launched and again after any
   navigating action; deny beats allow; explicit `allow` entries are the only
