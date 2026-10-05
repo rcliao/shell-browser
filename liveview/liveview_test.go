@@ -87,7 +87,7 @@ func TestDoneOnceAndWatchRefused(t *testing.T) {
 	got := make(chan Result, 2)
 	v.opt.OnDone = func(r Result) { got <- r }
 	for i := 0; i < 2; i++ {
-		req := httptest.NewRequest("POST", "/done", strings.NewReader("{}"))
+		req := httptest.NewRequest("POST", "/done", strings.NewReader(`{"note":"  take the blue one  "}`))
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("Tailscale-User-Name", "Someone")
 		w := httptest.NewRecorder()
@@ -97,7 +97,7 @@ func TestDoneOnceAndWatchRefused(t *testing.T) {
 		}
 	}
 	r := <-got
-	if r.URL != "https://example.com/x" || r.By != "Someone" {
+	if r.URL != "https://example.com/x" || r.By != "Someone" || r.Note != "take the blue one" {
 		t.Fatalf("result = %+v", r)
 	}
 	select {
