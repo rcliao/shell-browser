@@ -34,10 +34,10 @@ import (
 	"syscall"
 	"time"
 
-	cdpbrowser "github.com/chromedp/cdproto/browser"
-	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
+	"github.com/gobwas/ws"
+	"github.com/gobwas/ws/wsutil"
 )
 
 // EnvRoot overrides the sessions root. The shell daemon sets it per agent so
@@ -377,21 +377,44 @@ func doJSON(req *http.Request, v any) error {
 	return json.NewDecoder(resp.Body).Decode(v)
 }
 
-// Close shuts the session's Chrome down (Browser.close over CDP). The profile
-// stays on disk, so the next Ensure starts it again with the same logins.
+// Close shuts the session's Chrome down with Browser.close. The profile stays
+// on disk, so the next Ensure starts it again with the same logins.
+//
+// It speaks raw DevTools over the websocket: chromedp refuses Browser.close
+// through Run ("use chromedp.Cancel"), and chromedp.Cancel only closes
+// gracefully for browsers chromedp itself launched.
 func Close(ctx context.Context, ep *Endpoint) error {
-	allocCtx, cancelAlloc := chromedp.NewRemoteAllocator(ctx, ep.BrowserWS, chromedp.NoModifyURL)
-	defer cancelAlloc()
-	// Browser-level command: no tab needs attaching. Run it on the browser
-	// executor of a context that has connected.
-	c, cancel := chromedp.NewContext(allocCtx)
-	defer cancel()
-	if err := chromedp.Run(c, chromedp.ActionFunc(func(ctx context.Context) error {
-		return cdpbrowser.Close().Do(cdp.WithExecutor(ctx, chromedp.FromContext(ctx).Browser))
-	})); err != nil && !strings.Contains(err.Error(), "closed") {
+	conn, _, _, err := ws.Dial(ctx, ep.BrowserWS)
+	if err != nil {
 		return fmt.Errorf("close chrome: %w", err)
 	}
-	return nil
+	defer conn.Close()
+	if dl, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(dl)
+	} else {
+		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
+	}
+	if err := wsutil.WriteClientText(conn, []byte(`{"id":1,"method":"Browser.close"}`)); err != nil {
+		return fmt.Errorf("close chrome: %w", err)
+	}
+	// Chrome answers {"id":1,"result":{}} and then drops the connection; a
+	// dropped connection before the answer also means it is going away.
+	for {
+		msg, err := wsutil.ReadServerText(conn)
+		if err != nil {
+			return nil
+		}
+		var r struct {
+			ID    int             `json:"id"`
+			Error json.RawMessage `json:"error"`
+		}
+		if json.Unmarshal(msg, &r) == nil && r.ID == 1 {
+			if len(r.Error) > 0 {
+				return fmt.Errorf("close chrome: %s", r.Error)
+			}
+			return nil
+		}
+	}
 }
 
 // Attach connects to one tab of a running session and returns a chromedp
