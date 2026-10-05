@@ -94,9 +94,10 @@ button:disabled { opacity: .5; cursor: default; }
         <button type="submit">Enter</button>
       </form>
       <div class="row">
-        <button type="button" class="primary" id="done">Done, hand it back</button>
-        <span class="muted wide-only">The agent continues from wherever you leave the page.</span>
+        <input id="note" type="text" placeholder="Note for the agent (optional)" aria-label="Note for the agent" maxlength="2000">
+        <button type="button" class="primary" id="done">Done</button>
       </div>
+      <p class="muted wide-only">Done hands the browser back; the agent sees the page as you leave it, and your note.</p>
     </div>
     {{else}}
     <p class="muted help">You are watching. The agent is driving this tab.</p>
@@ -312,7 +313,7 @@ button:disabled { opacity: .5; cursor: default; }
   });
   document.getElementById("done").addEventListener("click", function () {
     this.disabled = true;
-    send("done", {}).then(function () {
+    send("done", { note: document.getElementById("note").value }).then(function () {
       ended("Thanks. The agent has the browser back. You can close this page.");
     }, function () { document.getElementById("done").disabled = false; });
   });

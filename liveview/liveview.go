@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"html/template"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -54,7 +55,13 @@ type Result struct {
 	URL   string
 	Title string
 	By    string // tailnet user name/login from tailscale serve headers, if any
+	// Note is what the person typed for the agent when tapping Done
+	// ("the blue one", "booked it, you can stop"); empty if nothing.
+	Note string
 }
+
+// maxNote caps the Done note; it ends up in the agent's next prompt.
+const maxNote = 2000
 
 // Options configures a Viewer.
 type Options struct {
@@ -533,8 +540,19 @@ func (v *Viewer) serveDone(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "application/json required", http.StatusUnsupportedMediaType)
 		return
 	}
+	var body struct {
+		Note string `json:"note"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "bad done body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	note := strings.TrimSpace(body.Note)
+	if r := []rune(note); len(r) > maxNote {
+		note = string(r[:maxNote])
+	}
 	v.mu.Lock()
-	res := Result{URL: v.url, Title: v.title, By: tailnetUser(r)}
+	res := Result{URL: v.url, Title: v.title, By: tailnetUser(r), Note: note}
 	v.mu.Unlock()
 	v.doneOnce.Do(func() {
 		if v.opt.OnDone != nil {
