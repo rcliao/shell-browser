@@ -17,6 +17,13 @@ func bare(mode Mode) *Viewer {
 		ctx: ctx, cancel: cancel, subs: map[chan []byte]struct{}{}}
 }
 
+// withTab gives a bare Viewer a (browserless) tab context so input reaches
+// validation; nothing here may actually talk to Chrome.
+func withTab(v *Viewer) *Viewer {
+	v.tabCtx = context.Background()
+	return v
+}
+
 func do(v *Viewer, method, path, ctype, body string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, strings.NewReader(body))
 	if ctype != "" {
@@ -54,6 +61,9 @@ func TestInputGuards(t *testing.T) {
 		{"watch mode refuses input", bare(ModeWatch), "application/json", `{"t":"back"}`, http.StatusForbidden},
 		{"form post refused (no CORS-free JSON)", bare(ModeHandoff), "application/x-www-form-urlencoded", "t=back", http.StatusUnsupportedMediaType},
 		{"bad json", bare(ModeHandoff), "application/json", "{", http.StatusBadRequest},
+		{"bad layout", withTab(bare(ModeHandoff)), "application/json", `{"t":"layout","layout":"tablet"}`, http.StatusBadRequest},
+		{"unknown event", withTab(bare(ModeHandoff)), "application/json", `{"t":"fly"}`, http.StatusBadRequest},
+		{"unsupported key", withTab(bare(ModeHandoff)), "application/json", `{"t":"key","k":"F13"}`, http.StatusBadRequest},
 	}
 	for _, c := range cases {
 		if w := do(c.v, "POST", "/input", c.ctype, c.body); w.Code != c.want {
@@ -135,5 +145,13 @@ func TestNormalizeURL(t *testing.T) {
 		if got, err := normalizeURL(bad); err == nil {
 			t.Errorf("normalizeURL(%q) = %q; want error", bad, got)
 		}
+	}
+}
+
+func TestStateCarriesLayout(t *testing.T) {
+	v := bare(ModeHandoff)
+	v.layout = LayoutPhone
+	if got := string(v.stateEventLocked()); !strings.Contains(got, `"layout":"phone"`) {
+		t.Fatalf("state = %s", got)
 	}
 }

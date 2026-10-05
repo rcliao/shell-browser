@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="referrer" content="no-referrer">
 <title>{{if .Title}}{{.Title}}{{else}}Live browser{{end}}</title>
 <style>
@@ -17,32 +17,49 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--fg);
   font: 15px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
-main { max-width: 1280px; margin: 0 auto; padding: 12px 16px 24px; }
+main { max-width: 1280px; margin: 0 auto; padding: 12px 16px 0; }
 h1 { font-size: 17px; font-weight: 600; margin: 0 0 2px; }
 p { margin: 0; }
 .muted { color: var(--muted); font-size: 13px; }
-.row { display: flex; gap: 6px; margin: 10px 0; }
+.row { display: flex; gap: 6px; margin: 10px 0; align-items: center; }
 .row input { flex: 1; min-width: 0; }
 input, button { font: inherit; color: var(--fg); background: var(--field);
   border: 1px solid var(--rule); border-radius: 3px; padding: 8px 10px; }
 button { cursor: pointer; white-space: nowrap; }
 button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
-#screenwrap { border: 1px solid var(--rule); line-height: 0; position: relative; }
+button:disabled { opacity: .5; cursor: default; }
+#urlline { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#screenwrap { border: 1px solid var(--rule); line-height: 0; position: relative; overflow: hidden; }
 #screen { width: 100%; height: auto; display: block; touch-action: pinch-zoom;
   user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
 #placeholder { padding: 48px 12px; text-align: center; line-height: 1.4; }
+.mark { position: absolute; width: 28px; height: 28px; margin: -14px 0 0 -14px;
+  border: 2px solid var(--accent); border-radius: 50%; pointer-events: none;
+  animation: fade .6s ease-out forwards; }
+@keyframes fade { from { opacity: 1; transform: scale(.6); } to { opacity: 0; transform: scale(1.4); } }
 #status { min-height: 1.4em; margin-top: 6px; }
 #status.err { color: var(--warn); }
+#text.armed { border-color: var(--accent); outline: 1px solid var(--accent); }
 .keys button { padding: 8px 9px; }
+#bar { position: sticky; bottom: 0; background: var(--bg); border-top: 1px solid var(--rule);
+  padding: 10px 0 calc(10px + env(safe-area-inset-bottom)); margin-top: 12px; }
+#bar .row { margin: 0; }
+#bar .row + .row { margin-top: 8px; }
 #ended { display: none; padding: 24px 0; }
-hr { border: 0; border-top: 1px solid var(--rule); margin: 12px 0; }
+.help { margin: 12px 0 16px; }
+@media (max-width: 700px) {
+  main { padding: 10px 12px 0; }
+  #screenwrap { margin: 0 -12px; border-left: 0; border-right: 0; }
+  .wide-only { display: none; }
+}
 </style>
 </head>
 <body>
 <main>
   <h1>{{if .Title}}{{.Title}}{{else}}Live browser{{end}}</h1>
   {{if .Reason}}<p>{{.Reason}}</p>{{end}}
-  <p class="muted"><span id="pageurl"></span>{{if .Expires}} · link expires {{.Expires}}{{end}}</p>
+  <p class="muted" id="urlline"><span id="pageurl"></span></p>
+  {{if .Expires}}<p class="muted">Link expires {{.Expires}}</p>{{end}}
 
   <div id="live">
     {{if .Interactive}}
@@ -60,26 +77,29 @@ hr { border: 0; border-top: 1px solid var(--rule); margin: 12px 0; }
     <p id="status" class="muted"></p>
 
     {{if .Interactive}}
-    <form class="row" id="typeform" autocomplete="off">
-      <input id="text" type="text" placeholder="Type here, then Send" aria-label="Text to type"
-             autocapitalize="off" autocorrect="off" spellcheck="false">
-      <button type="submit">Send</button>
-    </form>
     <div class="row keys">
-      <button type="button" data-key="Enter">Enter</button>
-      <button type="button" data-key="Backspace">Delete</button>
       <button type="button" data-key="Tab">Tab</button>
       <button type="button" data-key="Escape">Esc</button>
       <button type="button" id="reload">Reload</button>
+      <button type="button" id="layout">Phone layout</button>
     </div>
-    <hr>
-    <div class="row">
-      <button type="button" class="primary" id="done">Done, hand it back</button>
+    <p class="muted help">Tap the picture to click. Swipe on it to scroll, pinch to zoom.
+      After tapping a text field, type in the box below; letters go straight to the page.</p>
+
+    <div id="bar">
+      <form class="row" id="typeform" autocomplete="off">
+        <input id="text" type="text" placeholder="Type here" aria-label="Type into the page"
+               autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="enter">
+        <button type="button" data-key="Backspace">Delete</button>
+        <button type="submit">Enter</button>
+      </form>
+      <div class="row">
+        <button type="button" class="primary" id="done">Done, hand it back</button>
+        <span class="muted wide-only">The agent continues from wherever you leave the page.</span>
+      </div>
     </div>
-    <p class="muted">Tap the picture to click. Swipe up or down on it to scroll; pinch to zoom.
-      Tap a field first, then type in the box above and press Send.</p>
     {{else}}
-    <p class="muted">You are watching. The agent is driving this tab.</p>
+    <p class="muted help">You are watching. The agent is driving this tab.</p>
     {{end}}
   </div>
 
@@ -90,10 +110,14 @@ hr { border: 0; border-top: 1px solid var(--rule); margin: 12px 0; }
   "use strict";
   var interactive = {{.Interactive}};
   var img = document.getElementById("screen");
+  var wrap = document.getElementById("screenwrap");
   var placeholder = document.getElementById("placeholder");
   var statusEl = document.getElementById("status");
   var pageurl = document.getElementById("pageurl");
   var addr = document.getElementById("addr");
+  var layoutBtn = document.getElementById("layout");
+  var layout = "desktop", askedPhone = false;
+  var isPhone = window.matchMedia("(max-width: 700px)").matches;
 
   function setStatus(msg, isErr) {
     statusEl.textContent = msg || "";
@@ -104,12 +128,13 @@ hr { border: 0; border-top: 1px solid var(--rule); margin: 12px 0; }
     return fetch(path, { method: "POST", headers: { "Content-Type": "application/json" },
                          body: JSON.stringify(body || {}) })
       .then(function (r) {
-        if (r.ok) { return; }
+        if (r.status === 204) { return null; }
+        if (r.ok) { return r.json(); }
         return r.text().then(function (t) { throw new Error(t || ("HTTP " + r.status)); });
       })
       .catch(function (e) { setStatus(String(e.message || e), true); throw e; });
   }
-  function input(ev) { return send("input", ev).catch(function () {}); }
+  function input(ev) { return send("input", ev).catch(function () { return null; }); }
 
   function ended(message) {
     document.getElementById("live").style.display = "none";
@@ -128,6 +153,13 @@ hr { border: 0; border-top: 1px solid var(--rule); margin: 12px 0; }
     var d = JSON.parse(e.data);
     pageurl.textContent = d.title ? (d.title + " — " + d.url) : (d.url || "");
     if (addr && document.activeElement !== addr) { addr.value = d.url || ""; }
+    layout = d.layout || "desktop";
+    if (layoutBtn) { layoutBtn.textContent = layout === "phone" ? "Desktop layout" : "Phone layout"; }
+    // On a phone, ask once for the narrow layout so the page arrives tappable.
+    if (interactive && isPhone && !askedPhone && layout !== "phone") {
+      askedPhone = true;
+      input({ t: "layout", layout: "phone" });
+    }
   });
   es.addEventListener("ended", function (e) { ended(JSON.parse(e.data).message); });
   es.onopen = function () { setStatus(""); };
@@ -135,9 +167,35 @@ hr { border: 0; border-top: 1px solid var(--rule); margin: 12px 0; }
 
   if (!interactive) { return; }
 
+  var text = document.getElementById("text");
+
   function frac(clientX, clientY) {
     var r = img.getBoundingClientRect();
     return { x: (clientX - r.left) / r.width, y: (clientY - r.top) / r.height };
+  }
+  function mark(clientX, clientY) {
+    var r = wrap.getBoundingClientRect(), m = document.createElement("div");
+    m.className = "mark";
+    m.style.left = (clientX - r.left) + "px";
+    m.style.top = (clientY - r.top) + "px";
+    wrap.appendChild(m);
+    setTimeout(function () { m.remove(); }, 700);
+  }
+  function tap(clientX, clientY) {
+    mark(clientX, clientY);
+    var p = frac(clientX, clientY);
+    input({ t: "tap", x: p.x, y: p.y }).then(function (res) {
+      var editable = !!(res && res.editable);
+      text.classList.toggle("armed", editable);
+      if (editable) {
+        // Desktop and Android bring the keyboard up from here; iOS needs the
+        // person to tap the box, which is now outlined and in reach.
+        text.placeholder = "Type into the selected field";
+        try { text.focus({ preventScroll: true }); } catch (e) { text.focus(); }
+      } else {
+        text.placeholder = "Type here";
+      }
+    });
   }
 
   // Touch: a short touch without movement is a tap; a one-finger drag scrolls
@@ -160,19 +218,12 @@ hr { border: 0; border-top: 1px solid var(--rule); margin: 12px 0; }
   }, { passive: false });
   img.addEventListener("touchend", function (e) {
     if (!t0) { return; }
-    if (!moved) {
-      e.preventDefault();
-      var p = frac(t0.clientX, t0.clientY);
-      input({ t: "tap", x: p.x, y: p.y });
-    }
+    if (!moved) { e.preventDefault(); tap(t0.clientX, t0.clientY); }
     t0 = null;
   }, { passive: false });
 
   // Mouse (desktop).
-  img.addEventListener("click", function (e) {
-    var p = frac(e.clientX, e.clientY);
-    input({ t: "tap", x: p.x, y: p.y });
-  });
+  img.addEventListener("click", function (e) { tap(e.clientX, e.clientY); });
   img.addEventListener("wheel", function (e) {
     e.preventDefault();
     var p = frac(e.clientX, e.clientY);
@@ -190,12 +241,61 @@ hr { border: 0; border-top: 1px solid var(--rule); margin: 12px 0; }
     else if (e.key.length === 1) { e.preventDefault(); input({ t: "text", s: e.key }); }
   });
 
+  // Live typing box. Letters go to the page as they are typed. The box keeps
+  // one invisible character so Backspace still fires on an "empty" box (iOS
+  // sends nothing otherwise). IME input (Chinese, Japanese…) is left alone
+  // while composing and sent whole when the composition ends.
+  var SENTINEL = "\u200b", composing = false, justComposed = false;
+  function resetBox() {
+    text.value = SENTINEL;
+    try { text.setSelectionRange(1, 1); } catch (e) {}
+  }
+  text.addEventListener("focus", function () { if (!composing && text.value === "") { resetBox(); } });
+  text.addEventListener("compositionstart", function () { composing = true; });
+  text.addEventListener("compositionend", function (e) {
+    composing = false;
+    // Safari fires one more input event after compositionend; justComposed
+    // keeps it from sending the same text twice.
+    justComposed = true;
+    if (e.data) { input({ t: "text", s: e.data }); }
+    setTimeout(function () { justComposed = false; resetBox(); }, 0);
+  });
+  text.addEventListener("beforeinput", function (e) {
+    if (composing || e.isComposing) { return; }
+    switch (e.inputType) {
+      case "insertText":
+        e.preventDefault();
+        if (e.data) { input({ t: "text", s: e.data }); }
+        break;
+      case "insertFromPaste":
+      case "insertReplacementText":
+        e.preventDefault();
+        var s = e.data || (e.dataTransfer && e.dataTransfer.getData("text/plain")) || "";
+        if (s) { input({ t: "text", s: s }); }
+        break;
+      case "deleteContentBackward":
+        e.preventDefault();
+        input({ t: "key", k: "Backspace" });
+        break;
+      case "insertLineBreak":
+      case "insertParagraph":
+        e.preventDefault();
+        input({ t: "key", k: "Enter" });
+        break;
+    }
+  });
+  text.addEventListener("input", function (e) {
+    // Anything that slipped past beforeinput (older browsers): send and reset.
+    if (composing || e.isComposing || justComposed) { return; }
+    var v = text.value.replace(SENTINEL, "");
+    if (v) { input({ t: "text", s: v }); }
+    resetBox();
+  });
   document.getElementById("typeform").addEventListener("submit", function (e) {
     e.preventDefault();
-    var el = document.getElementById("text");
-    if (!el.value) { return; }
-    input({ t: "text", s: el.value }).then(function () { el.value = ""; });
+    input({ t: "key", k: "Enter" });
   });
+
   Array.prototype.forEach.call(document.querySelectorAll("[data-key]"), function (b) {
     b.addEventListener("click", function () { input({ t: "key", k: b.getAttribute("data-key") }); });
   });
@@ -206,6 +306,10 @@ hr { border: 0; border-top: 1px solid var(--rule); margin: 12px 0; }
   });
   document.getElementById("back").addEventListener("click", function () { input({ t: "back" }); });
   document.getElementById("reload").addEventListener("click", function () { input({ t: "reload" }); });
+  layoutBtn.addEventListener("click", function () {
+    askedPhone = true;
+    input({ t: "layout", layout: layout === "phone" ? "desktop" : "phone" });
+  });
   document.getElementById("done").addEventListener("click", function () {
     this.disabled = true;
     send("done", {}).then(function () {
