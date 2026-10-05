@@ -123,10 +123,13 @@ func New(parent context.Context, opt Options) (*Viewer, error) {
 // attach switches the view to tab tid: detach the old one (leaving it open),
 // listen to the new one and start its screencast.
 func (v *Viewer) attach(tid string) error {
-	tabCtx, release := session.Attach(v.ctx, v.opt.Endpoint, tid, chromedp.WithLogf(slog.Info))
+	tabCtx, release, err := session.Attach(v.ctx, v.opt.Endpoint, tid, chromedp.WithLogf(slog.Info))
+	if err != nil {
+		return fmt.Errorf("liveview: %w", err)
+	}
 	chromedp.ListenTarget(tabCtx, func(ev any) { v.onTabEvent(tabCtx, ev) })
 	var loc, title string
-	err := chromedp.Run(tabCtx,
+	err = chromedp.Run(tabCtx,
 		page.BringToFront(),
 		chromedp.Location(&loc),
 		chromedp.Title(&title),

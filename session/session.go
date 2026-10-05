@@ -420,21 +420,56 @@ func Close(ctx context.Context, ep *Endpoint) error {
 // Attach connects to one tab of a running session and returns a chromedp
 // context for it. release disconnects WITHOUT closing the tab.
 //
-// Why release is not just the CancelFunc: chromedp treats every context on a
-// RemoteAllocator as a non-first tab (chromedp.go NewContext sets first=false),
-// so cancelling it sends Target.closeTarget and the human's or agent's tab
-// disappears. Clearing Context.Target before cancelling makes chromedp's close
-// hook find nothing to close; the websocket still shuts down cleanly. Never
-// call chromedp.Cancel on these contexts either (it closes the browser).
-func Attach(ctx context.Context, ep *Endpoint, targetID string, opts ...chromedp.ContextOption) (context.Context, func()) {
-	allocCtx, cancelAlloc := chromedp.NewRemoteAllocator(ctx, ep.BrowserWS, chromedp.NoModifyURL)
+// chromedp closes a RemoteAllocator tab whenever a context it is bound to
+// ends: every such context counts as a non-first tab (chromedp.go NewContext
+// sets first=false), so its end sends Target.closeTarget; and
+// RemoteAllocator.Allocate ties the browser connection to the context of the
+// FIRST Run and calls Cancel on it when that context ends (allocate.go). A
+// run that hit its deadline therefore used to take the tab with it.
+//
+// So the tab context hangs off context.WithoutCancel(ctx), its first Run —
+// connect and attach — happens on that context (ctx only bounds the wait),
+// and release clears Context.Target before ending it, leaving chromedp's close
+// hook nothing to close. The returned context is a child carrying ctx's
+// deadline and cancellation; ending it only aborts the action in flight.
+// Never call chromedp.Cancel on these contexts: it closes the whole browser.
+func Attach(ctx context.Context, ep *Endpoint, targetID string, opts ...chromedp.ContextOption) (context.Context, func(), error) {
+	base := context.WithoutCancel(ctx)
+	allocCtx, cancelAlloc := chromedp.NewRemoteAllocator(base, ep.BrowserWS, chromedp.NoModifyURL)
 	opts = append([]chromedp.ContextOption{chromedp.WithTargetID(target.ID(targetID))}, opts...)
 	tabCtx, cancelTab := chromedp.NewContext(allocCtx, opts...)
-	return tabCtx, func() {
+	detach := func() {
 		if c := chromedp.FromContext(tabCtx); c != nil {
 			c.Target = nil
 		}
 		cancelTab()
 		cancelAlloc()
 	}
+
+	attached := make(chan error, 1)
+	go func() { attached <- chromedp.Run(tabCtx) }()
+	select {
+	case err := <-attached:
+		if err != nil {
+			detach()
+			return nil, nil, fmt.Errorf("attach to tab: %w", err)
+		}
+	case <-ctx.Done():
+		// Give up waiting. detach is safe mid-attach: the tab is not closed
+		// because Target is cleared before the context ends.
+		go func() { <-attached; detach() }()
+		return nil, nil, fmt.Errorf("attach to tab: %w", ctx.Err())
+	}
+
+	runCtx, cancelRun := context.WithCancel(tabCtx)
+	if dl, ok := ctx.Deadline(); ok {
+		cancelRun()
+		runCtx, cancelRun = context.WithDeadline(tabCtx, dl)
+	}
+	stop := context.AfterFunc(ctx, cancelRun)
+	return runCtx, func() {
+		stop()
+		cancelRun()
+		detach()
+	}, nil
 }

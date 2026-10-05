@@ -81,7 +81,11 @@ func attachSession(ctx context.Context, cfg Config) (context.Context, func(), er
 	if err != nil {
 		return nil, nil, fmt.Errorf("find the session's tab: %w", err)
 	}
-	browserCtx, release := session.Attach(ctx, ep, tid, chromedp.WithLogf(slog.Info))
+	browserCtx, release, err := session.Attach(ctx, ep, tid, chromedp.WithLogf(slog.Info))
+	if err != nil {
+		return nil, nil, err
+	}
+	s.Touch() // a long run must not look idle to the reaper while it runs
 	slog.Info("browser: attached to session", "session", s.Name, "port", ep.Port)
 	return browserCtx, func() {
 		release()
