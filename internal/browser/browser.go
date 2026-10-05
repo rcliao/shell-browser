@@ -60,6 +60,15 @@ type Config struct {
 	// ~/.shell/browser-profiles/<profile> so logins survive between runs.
 	// Empty means an ephemeral profile (the default).
 	Profile string `json:"profile"`
+
+	// Session, when non-empty, runs in a named Chrome that stays open between
+	// runs (see package session): the same tab, cookies and page state carry
+	// over, and a human can take the tab over in a live view. Headless only
+	// applies when the session's Chrome is first started.
+	Session string `json:"session"`
+
+	// SessionRoot overrides the sessions directory (default session.Root()).
+	SessionRoot string `json:"session_root"`
 }
 
 // StepResult holds the outcome of a single action.
@@ -128,10 +137,19 @@ func Execute(ctx context.Context, cfg Config, d Directive) *Result {
 	}
 	cfg.AllowJS = effectiveAllowJS(cfg, policy)
 
-	// Policy gate BEFORE any browser is launched.
-	if err := policy.Check(d.URL); err != nil {
-		result.fail(1, fmt.Sprintf("navigate %q", d.URL), err)
+	// Policy gate BEFORE any browser is launched. A session run that stays on
+	// its current page has no URL to check yet; its location is checked once
+	// the tab is attached.
+	stay := cfg.Session != "" && d.URL == StayURL
+	if d.URL == StayURL && cfg.Session == "" {
+		result.fail(1, "navigate", errors.New(`url "-" (stay on the current page) needs --session`))
 		return result
+	}
+	if !stay {
+		if err := policy.Check(d.URL); err != nil {
+			result.fail(1, fmt.Sprintf("navigate %q", d.URL), err)
+			return result
+		}
 	}
 
 	timeout := time.Duration(cfg.TimeoutSeconds) * time.Second
@@ -142,72 +160,72 @@ func Execute(ctx context.Context, cfg Config, d Directive) *Result {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Build chromedp options with anti-detection measures.
-	opts := append(chromedp.DefaultExecAllocatorOptions[:],
-		// Anti-detection: remove automation indicators
-		chromedp.Flag("disable-blink-features", "AutomationControlled"),
-		chromedp.Flag("exclude-switches", "enable-automation"),
-		chromedp.Flag("disable-features", "AutomationControlled"),
-
-		// Realistic user agent
-		chromedp.UserAgent(defaultUserAgent),
-
-		// Realistic window size
-		chromedp.WindowSize(1920, 1080),
-
-		// Disable automation-related infobars
-		chromedp.Flag("disable-infobars", true),
-		chromedp.Flag("disable-extensions", true),
+	var (
+		browserCtx context.Context
+		closeFn    func()
+		err        error
 	)
-	if cfg.Headless {
-		// Use new headless mode which is harder to detect
-		opts = append(opts, chromedp.Flag("headless", "new"))
+	if cfg.Session != "" {
+		browserCtx, closeFn, err = attachSession(ctx, cfg)
+	} else {
+		browserCtx, closeFn, err = launchEphemeral(ctx, cfg)
 	}
-	if cfg.ChromePath != "" {
-		opts = append(opts, chromedp.ExecPath(cfg.ChromePath))
-	}
-	if cfg.Profile != "" {
-		dir, err := ProfileDir(cfg.Profile)
-		if err != nil {
-			result.fail(1, fmt.Sprintf("profile %q", cfg.Profile), err)
-			return result
+	if err != nil {
+		desc := "launch browser"
+		if cfg.Session != "" {
+			desc = fmt.Sprintf("session %q", cfg.Session)
 		}
-		opts = append(opts, chromedp.UserDataDir(dir))
-		slog.Info("browser: using persistent profile", "profile", sanitizeProfileName(cfg.Profile))
+		result.fail(1, desc, err)
+		return result
 	}
-
-	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, opts...)
-	defer allocCancel()
-
-	// WithLogf only, deliberately: chromedp's WithDebugf dumps raw CDP traffic,
-	// which carries cookies, form values and page content. Do not add it.
-	browserCtx, browserCancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(slog.Info))
-	defer browserCancel()
+	defer closeFn()
 
 	ex := &executor{ctx: browserCtx, cfg: cfg, policy: policy, currentURL: d.URL}
 
-	// Inject stealth JS before navigation to patch navigator properties.
-	if err := chromedp.Run(browserCtx, chromedp.Evaluate(stealthJS, nil)); err != nil {
-		slog.Warn("browser: stealth injection failed (non-fatal)", "error", err)
-	}
+	if stay {
+		var loc string
+		if err := chromedp.Run(browserCtx, chromedp.Location(&loc)); err != nil {
+			result.fail(1, "stay on current page", err)
+			return result
+		}
+		result.URL = loc
+		ex.currentURL = ""
+		step := StepResult{Step: 1, Description: "stay on current page", Output: loc}
+		if err := ex.syncLocation(); err != nil {
+			step.Err = err
+		}
+		result.Steps = append(result.Steps, step)
+		if step.Err != nil {
+			return result
+		}
+	} else {
+		if cfg.Session == "" {
+			// Inject stealth JS before navigation to patch navigator properties.
+			// Session Chromes are real, un-automated browsers and skip this.
+			if err := chromedp.Run(browserCtx, chromedp.Evaluate(stealthJS, nil)); err != nil {
+				slog.Warn("browser: stealth injection failed (non-fatal)", "error", err)
+			}
+		}
 
-	// Always navigate first.
-	slog.Info("browser: navigating", "url", redactURL(d.URL))
-	if err := chromedp.Run(browserCtx, chromedp.Navigate(d.URL)); err != nil {
-		result.fail(1, fmt.Sprintf("navigate %q", d.URL), err)
-		return result
-	}
-	navStep := StepResult{Step: 1, Description: fmt.Sprintf("navigate %q", d.URL), Output: "OK"}
-	// Re-check the landing URL: redirects can move us off the approved host.
-	if err := ex.syncLocation(); err != nil {
-		navStep.Err = err
+		slog.Info("browser: navigating", "url", redactURL(d.URL))
+		if err := chromedp.Run(browserCtx, chromedp.Navigate(d.URL)); err != nil {
+			result.fail(1, fmt.Sprintf("navigate %q", d.URL), err)
+			return result
+		}
+		navStep := StepResult{Step: 1, Description: fmt.Sprintf("navigate %q", d.URL), Output: "OK"}
+		// Re-check the landing URL: redirects can move us off the approved host.
+		if err := ex.syncLocation(); err != nil {
+			navStep.Err = err
+			result.Steps = append(result.Steps, navStep)
+			return result
+		}
 		result.Steps = append(result.Steps, navStep)
-		return result
 	}
-	result.Steps = append(result.Steps, navStep)
 
 	// Re-inject stealth after navigation (page load resets JS state).
-	_ = chromedp.Run(browserCtx, chromedp.Evaluate(stealthJS, nil))
+	if cfg.Session == "" {
+		_ = chromedp.Run(browserCtx, chromedp.Evaluate(stealthJS, nil))
+	}
 
 	// Execute each action.
 	for i, action := range d.Actions {
@@ -347,7 +365,9 @@ func (e *executor) execute(step int, a Action) StepResult {
 
 	case ActionExtract:
 		var text string
-		if err := chromedp.Run(ctx, chromedp.Text(a.Selector, &text, chromedp.ByQuery)); err != nil {
+		if err := retryStale(func() error {
+			return chromedp.Run(ctx, chromedp.Text(a.Selector, &text, chromedp.ByQuery))
+		}); err != nil {
 			sr.Err = e.enrich(a.Selector, err)
 		} else {
 			e.markUntrusted(&sr, strings.TrimSpace(text))
@@ -355,7 +375,9 @@ func (e *executor) execute(step int, a Action) StepResult {
 
 	case ActionText:
 		var text string
-		if err := chromedp.Run(ctx, chromedp.Text("body", &text, chromedp.ByQuery)); err != nil {
+		if err := retryStale(func() error {
+			return chromedp.Run(ctx, chromedp.Text("body", &text, chromedp.ByQuery))
+		}); err != nil {
 			sr.Err = err
 		} else {
 			e.markUntrusted(&sr, collapseWhitespace(text))
@@ -556,4 +578,16 @@ func redactURL(raw string) string {
 		u.RawQuery = q.Encode()
 	}
 	return u.String()
+}
+
+// retryStale re-runs a read whose DOM node vanished because a navigation (say,
+// from the previous click) replaced the document mid-read. A real windowed
+// Chrome commits navigations later than headless, so this shows up there.
+func retryStale(read func() error) error {
+	err := read()
+	for i := 0; i < 3 && err != nil && strings.Contains(err.Error(), "No node with given id"); i++ {
+		time.Sleep(400 * time.Millisecond)
+		err = read()
+	}
+	return err
 }
